@@ -88,6 +88,11 @@ sub AnalyzeOPF {
 	@remlist = ();
 	$counter = 0;
 	$parseopf->parsefile("$tempdir/$rootfile");
+	# We now know which id's we are going to remove
+	# We have to remove them from 3 places:
+	#   1. OPF file
+	#   2. NCX file (if exists)
+	#   3. EPUB3 toc file (if exists)
 	WriteOPF("$tempdir/$rootfile", "$tempdir/$rootfile.tmp");
 }
 
