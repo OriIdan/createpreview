@@ -1,0 +1,204 @@
+#!/usr/bin/perl
+# Create preview EPUB out of given EPUB
+# Written by: Ori Idan <ori@heliconbooks.com>
+# License: GPL v. 3 (http://www.gnu.org/copyleft/gpl.html)
+
+# This script takes an EPUB file, unpacks it, removes files (chapters) 
+# leaving a predefined number of chapters.
+# It will add metadata according to http://www.idpf.org/epub/previews/
+use XML::Parser;
+use File::Basename;
+use File::Copy qw(copy move);
+use I18N::Langinfo qw(langinfo CODESET);
+use Encode qw(decode);
+binmode STDOUT, ":utf8";
+
+$tmpbase = "staging";
+
+use constant {
+	NONE => 0,
+	META => 100,
+	MANIFEST => 200,
+	SPINE => 300,
+	DCTERMS => 101,
+	NAV => 400,
+	NAVUL => 401,
+	NAVLI => 402,
+	NAVLIA => 403,
+};
+
+$state = NONE;
+
+if(($#ARGV + 1) < 2) {
+	print "Create EPUB preview from given EPUB\n";
+	print "usage: createpreview <epubfile> <num> <newfile> [acquisitionlink]\n";
+	exit;
+}
+
+$codeset = langinfo(CODESET);
+@ARGV = map { decode $codeset, $_ } @ARGV;
+
+# Get command line arguments
+$epubname = $ARGV[0];
+$numchap = $ARGV[1];
+$newfile = $ARGV[2];
+$acqlink = $ARGV[3];
+
+($basename, $oepbsdir, $ext) = fileparse($epubname, qr/\.[^.]*/);
+
+$tempdir = "$tmpbase/$basename";
+
+if(!mkdir($tempdir)) {
+	$err = $!;
+	if($err ne 'File exists') {
+		print "Error: $!\n";
+		die;
+	}
+}
+
+# Extracting file to temporary directory
+system("unzip -u $epubname -d $tempdir");
+
+$container = "$tempdir/META-INF/container.xml";
+if(! -e $container) {
+	print "Error: $tempdir/META-INF/container.xml file does not exist\n";
+	exit;
+}
+
+$cparse = new XML::Parser(Handlers => {Start => \&hdl_start });
+
+$cparse->parsefile($container);
+
+sub hdl_start {
+	my ($p, $elt, %atts) = @_;
+	if($elt eq 'rootfile') {
+		$rootfile = $atts{'full-path'};
+		print "#Root file: $tempdir/$rootfile\n";
+		AnalyzeOPF();
+	}
+}
+
+sub AnalyzeOPF {
+	$parseopf = new XML::Parser(Handlers => {'Start' => \&opf_start, 
+											 'End' => \&opf_end
+											 });
+	($n, $oebpsdir, $ext) = fileparse($rootfile);
+	print "Processing OPF $tempdir/$rootfile\n";
+	# Initialize remove list
+	@remlist = ();
+	$counter = 0;
+	$parseopf->parsefile("$tempdir/$rootfile");
+	WriteOPF("$tempdir/$rootfile", "$tempdir/$rootfile.tmp");
+}
+
+sub opf_start {
+	my ($p, $elt, %atts) = @_;
+
+	if($etl eq 'metadata') {
+		$state = META;
+	}
+	if($elt eq 'manifest') {
+		$state = MANIFEST;
+	}
+	if($elt eq 'spine') {
+		$state = SPINE;
+	}
+	if($state == SPINE) {
+		if($elt eq 'itemref') {
+			if(($counter <= $numchap) && ($atts{'linear'} ne 'no')) {
+				$counter++;
+			}
+			if(($counter > $numchap) && ($atts{'linear'} ne 'no')) {
+				push(@remlist, $atts{'idref'});
+			}
+		}
+	}
+}
+
+sub opf_end {
+	my ($p, $elt, %atts) = @_;
+
+	if($elt eq 'metadata') {
+		print TMPFILE "</metadata>\n";
+		$state = NONE;
+	}
+	elsif($elt eq 'manifest') {
+		print TMPFILE "</manifest>\n";
+		$state = NONE;
+	}
+	elsif($elt eq 'spine') {
+		print TMPFILE "</spine>\n";
+		$state = NONE;
+	}
+	elsif($elt eq 'package') {
+		print TMPFILE "</package>\n";
+		$state = NONE;
+	}
+}
+
+sub opf_wchar {
+	my ($p, $str) = @_;
+	
+	print TMPFILE $str;
+}
+
+# Create new OPF
+# It is assumed that @remlist contains list of id's to be removed
+sub WriteOPF {
+	my ($opf, $tmpopf) = @_;
+	
+	open(IN, $opf);
+	binmode IN, ":utf8";
+	open(OUT, ">$tmpopf");
+	binmode OUT, ":utf8";
+	
+	$state = 0;
+	$noprint = 0;
+	while(<IN>) {
+		if($state == NONE) {	# metadata or no section
+			if(/manifest/) {
+				$state = MANIFEST;
+			}
+			else {
+				print OUT $_;
+			}
+		}
+		if($state == MANIFEST) {
+			if(/spine/) {
+				$state = SPINE;
+				$noprint = 1;
+			}
+			$line = $_;
+			$line =~ /id="(.*?)"/;
+			$id = $1;
+			print "id:  $id\n";
+			if(grep $_ eq $id, @remlist) {
+				$noprint = 1;
+			}
+			if($noprint == 0) {
+				print OUT $line;
+			}
+			if($noprint && ($line =~ /\/>/)) {
+				$noprint = 0;
+			}
+			
+		}
+		if($state == SPINE) {
+			$line = $_;
+			$line =~ /idref="(.*)"/;
+			$id = $1;
+			if(grep $_ eq $id, @remlist) {
+				$noprint = 1;
+			}
+			else {
+				print OUT $line;
+				$noprint = 0;
+			}
+			if($line =~ /\/spine/) {
+				$state = NONE;
+			}
+		}
+	}
+	close(OUT);
+	close(IN);
+}
