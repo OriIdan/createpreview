@@ -22,7 +22,7 @@ use constant {
 	SPINE => 300,
 	DCTERMS => 101,
 	NAV => 400,
-	NAVUL => 401,
+	NAVOL => 401,
 	NAVLI => 402,
 	NAVLIA => 403,
 };
@@ -74,6 +74,9 @@ sub hdl_start {
 	if($elt eq 'rootfile') {
 		$rootfile = $atts{'full-path'};
 		print "#Root file: $tempdir/$rootfile\n";
+		$rootfile =~ /(.*)\/.*/;
+		$base = "$tempdir/$1";
+		print "Base: $base\n";
 		AnalyzeOPF();
 	}
 }
@@ -93,7 +96,50 @@ sub AnalyzeOPF {
 	#   1. OPF file
 	#   2. NCX file (if exists)
 	#   3. EPUB3 toc file (if exists)
-	WriteOPF("$tempdir/$rootfile", "$tempdir/$rootfile.tmp");
+	WriteOPF("$tempdir/$rootfile");
+	# Handle EPUB3 toc file
+	if($tocfile) {
+		HandleTocFile($tocfile);
+	}
+	if($ncxfile) {
+		HandleNCX($ncxfile);
+	}
+	# We are done now with the 3 files we need to change, now pack the EPUB file
+	chdir($tempdir);
+	system("zip -0Xq tmp.zip mimetype");
+	system("zip -Xr9Dq tmp.zip META-INF/");
+	system("zip -Xr9Dq tmp.zip $rootfile");
+	$parseopf = new XML::Parser(Handlers => {'Start' => \&opf_packstart});
+	print "#Pack handleOPF $rootfile\n";
+	($n, $oepbsdir, $ext) = fileparse($rootfile);
+	$parseopf->parsefile("$rootfile");
+	copy("tmp.zip", $newfile);
+}
+
+sub opf_packstart {
+	my ($p, $elt, %atts) = @_;
+	
+	if($elt eq 'metadata') {
+		$state = META;	
+	}
+	elsif($elt eq 'manifest') {
+		$state = MANIFEST;
+	}
+	elsif($elt eq 'spine') {
+		$state = SPINE;
+	}
+	if($state == META) {
+		if($atts{'name'} eq 'cover') {
+			$coverid = $atts{'content'};
+		}
+	}
+	if($state == MANIFEST) {
+		if($elt eq 'item') {
+			$ref = $atts{'href'};
+#			print "Adding file: $oepbsdir$ref\n";
+			system("zip -Xr9Dq tmp.zip $oepbsdir$ref");
+		}
+	}
 }
 
 sub opf_start {
@@ -107,6 +153,18 @@ sub opf_start {
 	}
 	if($elt eq 'spine') {
 		$state = SPINE;
+	}
+	if($state == MANIFEST) {
+		if($atts{'media-type'} =~ /dtbncx/) {
+			$ncxfile = $atts{'href'};
+			$ncxfile = "$base/$ncxfile";
+			print "NCX: $ncxfile\n";
+		}
+		if($atts{'properties'} =~ /nav/) {
+			$tocfile = $atts{'href'};
+			$tocfile = "$base/$tocfile";
+			print "TOC: $tocfile\n";
+		}
 	}
 	if($state == SPINE) {
 		if($elt eq 'itemref') {
@@ -150,8 +208,9 @@ sub opf_wchar {
 # Create new OPF
 # It is assumed that @remlist contains list of id's to be removed
 sub WriteOPF {
-	my ($opf, $tmpopf) = @_;
-	
+	$opf = shift;
+
+	$tmpopf = "$opf.tmp";	
 	open(IN, $opf);
 	binmode IN, ":utf8";
 	open(OUT, ">$tmpopf");
@@ -160,9 +219,22 @@ sub WriteOPF {
 	$state = 0;
 	$noprint = 0;
 	while(<IN>) {
-		if($state == NONE) {	# metadata or no section
-			if(/manifest/) {
+		if($state == NONE) {
+			if(/metadata/) {
+				$state = META;
+			}
+			elsif(/manifest/) {
 				$state = MANIFEST;
+			}
+			else {
+				print OUT $_;
+			}
+		}
+		if($state == META) {
+			if(/<\/metadata/) {
+				print OUT "<dc:type>preview</dc:type>\n";
+				print OUT $_;
+				$state = NONE;
 			}
 			else {
 				print OUT $_;
@@ -176,7 +248,6 @@ sub WriteOPF {
 			$line = $_;
 			$line =~ /id="(.*?)"/;
 			$id = $1;
-			print "id:  $id\n";
 			if(grep $_ eq $id, @remlist) {
 				$noprint = 1;
 			}
@@ -206,4 +277,103 @@ sub WriteOPF {
 	}
 	close(OUT);
 	close(IN);
+	copy($tmpopf, $opf);
+}
+
+# Delete unneeded id's from TOC file
+# It is assumed that same id's used in TOC file as used in OPF
+# This is not a requirement of the standard therefore we are running a risk here.
+# From my experience it is rare to see different id's in TOC file.
+sub HandleTocFile {
+	$tocfile = shift;
+	
+	$tmptoc = "$tocfile.tmp";
+	open(IN, $tocfile);
+	binmode IN, ":utf8";
+	open(OUT, ">$tmptoc");
+	binmode OUT, ":utf8";
+	
+	$state = NONE;
+	while(<IN>) {
+		if($state == NONE) {
+			if(/<nav/) {
+				$state = NAV;
+			}
+			print OUT $_;
+		}
+		elsif($state == NAV) {	# We are waiting for <ol>
+			if(/ol/) {
+				$state = NAVOL;
+			}
+			print OUT $_;
+		}
+		elsif($state == NAVOL) {	# Every tag now is <li> tag
+			$line = $_;
+			if(/li id="(.*?)"/) {
+				$id = $1;
+				if(grep $_ eq $id, @remlist) {
+					$noprint = 1;
+				}
+				if($noprint == 0) {
+					print OUT $line;
+				}
+				if($line =~ /<\/li/) {
+					$noprint = 0;
+				}
+			}
+			if($line =~ /ol/) {
+				$state = NONE;
+				print OUT $line;
+			}
+		}
+	}
+	close(IN);
+	close(OUT);
+	copy($tocfile, $tmptoc);
+}
+
+# Delete unneeded id's from NCX file
+# It is assumed that id's here are the same as used in OPF file
+# Note that NCX structure is much more complicated then TOC file structure
+sub HandleNCX {
+	$ncxfile = shift;
+	
+	$tmpncx = "$ncxfile.tmp";
+	open(IN, $ncxfile);
+	binmode IN, ":utf8";
+	open(OUT, ">$tmpncx");
+	binmode OUT, ":utf8";
+
+	$state = NONE;
+	$po = 1;	# We handle play order no matter what is written in NCX file
+	while(<IN>) {
+		if($state == NONE) {
+			if(/<navmap/i) {
+				$state = NAV;
+			}
+			print OUT $_;
+		}
+		elsif($state == NAV) {
+			$line = $_;
+			if(/<navPoint.*id="(.*?)"/i) {
+				$id = $1;
+				if(grep $_ eq $id, @remlist) {
+					$noprint = 1;
+				}
+				if($noprint == 0) {
+					print OUT "<navPoint class=\"chapter\" id=\"$id\" playOrder=\"$po\">\n";
+					$po++;
+				}
+			}
+			elsif($noprint == 0) {
+				print OUT $line;
+			}
+			if(/<\/navPoint/i) {
+				$noprint = 0;
+			}
+		}
+	}
+	close(IN);
+	close(OUT);
+	copy($tmpncx, $ncxfile);
 }
