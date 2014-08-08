@@ -9,6 +9,8 @@
 use XML::Parser;
 use File::Basename;
 use File::Copy qw(copy move);
+use File::Path 'rmtree';
+use Cwd;
 use I18N::Langinfo qw(langinfo CODESET);
 use Encode qw(decode);
 binmode STDOUT, ":utf8";
@@ -105,6 +107,8 @@ sub AnalyzeOPF {
 		HandleNCX($ncxfile);
 	}
 	# We are done now with the 3 files we need to change, now pack the EPUB file
+	$cwd = getcwd;
+	print "CWD: $cwd\n";
 	chdir($tempdir);
 	system("zip -0Xq tmp.zip mimetype");
 	system("zip -Xr9Dq tmp.zip META-INF/");
@@ -113,7 +117,9 @@ sub AnalyzeOPF {
 	print "#Pack handleOPF $rootfile\n";
 	($n, $oepbsdir, $ext) = fileparse($rootfile);
 	$parseopf->parsefile("$rootfile");
-	copy("tmp.zip", $newfile);
+	chdir($cwd);
+	copy("$tempdir/tmp.zip", $newfile);
+	rmtree([ $tempdir ]);
 }
 
 sub opf_packstart {
@@ -309,10 +315,11 @@ sub HandleTocFile {
 		}
 		elsif($state == NAVOL) {	# Every tag now is <li> tag
 			$line = $_;
-			if(/li id="(.*?)"/) {
+			if($line =~ /li id="(.*?)"/) {
 				$id = $1;
 				if(grep $_ eq $id, @remlist) {
 					$noprint = 1;
+					print "id: $id\n";
 				}
 				if($noprint == 0) {
 					print OUT $line;
@@ -329,7 +336,7 @@ sub HandleTocFile {
 	}
 	close(IN);
 	close(OUT);
-	copy($tocfile, $tmptoc);
+	copy($tmptoc, $tocfile);
 }
 
 # Delete unneeded id's from NCX file
