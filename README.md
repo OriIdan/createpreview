@@ -5,7 +5,7 @@ Create an EPUB Preview file based on EPUB file (according to IDPF Previews stand
 
 Usage: createpreview <ebubfile> <num> <newfilename> [acquirelink]
 
-Note: This is currently a work in progress and still does not do anything usfull.
+Note: Acquire link is not supported in this version
 
 License: GPL v. 3
 
