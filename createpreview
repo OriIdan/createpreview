@@ -15,9 +15,10 @@ use DateTime;
 use Cwd;
 use I18N::Langinfo qw(langinfo CODESET);
 use Encode qw(decode);
+use Archive::Zip;
 binmode STDOUT, ":utf8";
 
-$tmpbase = "staging";
+$tmpbase = "/tmp";
 
 use constant {
 	NONE => 0,
@@ -73,7 +74,13 @@ if(!mkdir($tempdir)) {
 }
 
 # Extracting file to temporary directory
-system("unzip -u $epubname -d $tempdir");
+#system("unzip -u $epubname -d $tempdir");
+$zipfile = Archive::Zip->new();
+$status = $zipfile->read($epubname);
+if($status != AZ_OK) {
+	die("Error extracting $epubname");
+}
+$zipfile->extractTree(undef, $tempdir);
 
 $container = "$tempdir/META-INF/container.xml";
 if(! -e $container) {
@@ -124,16 +131,19 @@ sub AnalyzeOPF {
 	# We are done now with the 3 files we need to change, now pack the EPUB file
 	$cwd = getcwd;
 	print "CWD: $cwd\n";
-	chdir($tempdir);
-	system("zip -0Xq tmp.zip mimetype");
-	system("zip -Xr9Dq tmp.zip META-INF/");
-	system("zip -Xr9Dq tmp.zip $rootfile");
+#	chdir($tempdir);
+	$outzip = Archive::Zip->new();
+	$outzip->addFile("$tempdir/mimetype", 'mimetype', 0);
+	$outzip->addTree("$tempdir/META-INF", 'META-INF');
+	print "Adding $tempdir/$rootfile\n";
+	$outzip->addFile("$tempdir/$rootfile", $rootfile);
 	$parseopf = new XML::Parser(Handlers => {'Start' => \&opf_packstart});
 	print "#Pack handleOPF $rootfile\n";
 	($n, $oepbsdir, $ext) = fileparse($rootfile);
-	$parseopf->parsefile("$rootfile");
-	chdir($cwd);
-	copy("$tempdir/tmp.zip", $newfile);
+	$parseopf->parsefile("$tempdir/$rootfile");
+	unless($outzip->writeToFileNamed($newfile) == AZ_OK) {
+		print "Error writing to $newfile\n";
+	}
 	rmtree([ $tempdir ]);
 }
 
@@ -157,8 +167,9 @@ sub opf_packstart {
 	if($state == MANIFEST) {
 		if($elt eq 'item') {
 			$ref = $atts{'href'};
-#			print "Adding file: $oepbsdir$ref\n";
-			system("zip -Xr9Dq tmp.zip $oepbsdir$ref");
+			print "Adding file: $tempdir/$oepbsdir$ref\n";
+#			system("zip -Xr9Dq tmp.zip $oepbsdir$ref");
+			$outzip->addFile("$tempdir/$oepbsdir$ref", "$oepbsdir$ref");
 		}
 	}
 }
@@ -334,7 +345,7 @@ sub WriteOPF {
 	}
 	close(OUT);
 	close(IN);
-#	copy($tmpopf, $opf);
+	copy($tmpopf, $opf);
 }
 
 # Delete unneeded id's from TOC file
@@ -370,7 +381,6 @@ sub HandleTocFile {
 				$id = $1;
 				if(grep $_ eq $id, @remlist) {
 					$noprint = 1;
-					print "id: $id\n";
 				}
 				if($noprint == 0) {
 					print OUT $line;
@@ -406,6 +416,9 @@ sub HandleNCX {
 	$po = 1;	# We handle play order no matter what is written in NCX file
 	while(<IN>) {
 		if($state == NONE) {
+			if(/dtb:uid/) {
+				$_ = "<meta name=\"dtb:uid\" content=\"$cid\"/>\n";
+			}
 			if(/<navmap/i) {
 				$state = NAV;
 			}
