@@ -6,10 +6,12 @@
 # This script takes an EPUB file, unpacks it, removes files (chapters) 
 # leaving a predefined number of chapters.
 # It will add metadata according to http://www.idpf.org/epub/previews/
+use Getopt::Long;
 use XML::Parser;
 use File::Basename;
 use File::Copy qw(copy move);
 use File::Path 'rmtree';
+use DateTime;
 use Cwd;
 use I18N::Langinfo qw(langinfo CODESET);
 use Encode qw(decode);
@@ -20,9 +22,10 @@ $tmpbase = "staging";
 use constant {
 	NONE => 0,
 	META => 100,
+	DCID => 101,
+	DCMOD => 102,
 	MANIFEST => 200,
 	SPINE => 300,
-	DCTERMS => 101,
 	NAV => 400,
 	NAVOL => 401,
 	NAVLI => 402,
@@ -33,7 +36,13 @@ $state = NONE;
 
 if(($#ARGV + 1) < 2) {
 	print "Create EPUB preview from given EPUB\n";
-	print "usage: createpreview <epubfile> <num> <newfile> [acquisitionlink]\n";
+	print "usage: createpreview [options] <epubfile> <num>\n";
+	print "options are:\n";
+	print "-o <outputfile> - Set output file name (default overwrite original)\n";
+	print "-a <acqlink> - Set acquisition link for original file\n";
+	print "--catalog <catalog> - Set link to OPDS catalog containing the original file\n";
+	print "-i <identifier> - Set new identifier for file\n";
+	print "--identifier <identifier> - Same as -s\n";
 	exit;
 }
 
@@ -41,10 +50,15 @@ $codeset = langinfo(CODESET);
 @ARGV = map { decode $codeset, $_ } @ARGV;
 
 # Get command line arguments
+$result = GetOptions("o=s" => \$newfile, "a=s" => \$acqlink, 
+	"catalog=s" => \$catlink,
+	"i=s" => \$identifier, "identifier=s" => \$identifier);
 $epubname = $ARGV[0];
 $numchap = $ARGV[1];
-$newfile = $ARGV[2];
-$acqlink = $ARGV[3];
+
+if(!$newfile) {
+	$newfile = $epubname;
+}
 
 ($basename, $oepbsdir, $ext) = fileparse($epubname, qr/\.[^.]*/);
 
@@ -85,7 +99,8 @@ sub hdl_start {
 
 sub AnalyzeOPF {
 	$parseopf = new XML::Parser(Handlers => {'Start' => \&opf_start, 
-											 'End' => \&opf_end
+											 'End' => \&opf_end,
+											 'Char' => \&opf_char
 											 });
 	($n, $oebpsdir, $ext) = fileparse($rootfile);
 	print "Processing OPF $tempdir/$rootfile\n";
@@ -151,7 +166,10 @@ sub opf_packstart {
 sub opf_start {
 	my ($p, $elt, %atts) = @_;
 
-	if($etl eq 'metadata') {
+	if($elt eq 'package') {
+		$bookid = $atts{'unique-identifier'};
+	}
+	if($elt eq 'metadata') {
 		$state = META;
 	}
 	if($elt eq 'manifest') {
@@ -159,6 +177,14 @@ sub opf_start {
 	}
 	if($elt eq 'spine') {
 		$state = SPINE;
+	}
+	if($state == META) {
+		if($atts{'id'} eq $bookid) {
+			$state = DCID;
+		}
+		if($atts{'property'} eq 'dcterms:modified') {
+			$state = DCMOD;
+		}
 	}
 	if($state == MANIFEST) {
 		if($atts{'media-type'} =~ /dtbncx/) {
@@ -187,28 +213,29 @@ sub opf_start {
 sub opf_end {
 	my ($p, $elt, %atts) = @_;
 
+	if(($state == DCMOD) || ($state == DCID)) {
+		$state = META;
+	}
 	if($elt eq 'metadata') {
-		print TMPFILE "</metadata>\n";
 		$state = NONE;
 	}
 	elsif($elt eq 'manifest') {
-		print TMPFILE "</manifest>\n";
 		$state = NONE;
 	}
 	elsif($elt eq 'spine') {
-		print TMPFILE "</spine>\n";
 		$state = NONE;
 	}
 	elsif($elt eq 'package') {
-		print TMPFILE "</package>\n";
 		$state = NONE;
 	}
 }
 
-sub opf_wchar {
+sub opf_char {
 	my ($p, $str) = @_;
 	
-	print TMPFILE $str;
+	if($state == DCID) {
+		$bookidval = $str;
+	}
 }
 
 # Create new OPF
@@ -237,8 +264,32 @@ sub WriteOPF {
 			}
 		}
 		if($state == META) {
-			if(/<\/metadata/) {
+			if(/id="(.*?)"/) {
+				if($1 eq $bookid) {	# Change book id since ID must not be the same as original id
+					if($identifier) {
+						$cid = $identifier;
+					}
+					else {
+						$cid = "p_$bookidval";
+					}
+					print OUT "<dc:identifier id=\"$bookid\">$cid</dc:identifier>\n";
+				}
+			}
+			elsif(/dcterms:modified/) {
+				$dt = DateTime->now();
+				$dtstr = $dt->ymd('-')  . "T" . $dt->hms(':') . "Z";
+				print "dtstr: $dtstr\n";
+				print OUT "<meta property=\"dcterms:modified\">$dtstr</meta>\n"; 
+			}
+			elsif(/<\/metadata/) {
 				print OUT "<dc:type>preview</dc:type>\n";
+				print OUT "<dc:source>$bookidval</dc:source>\n";
+				if($acqlink) {
+					print OUT "<link href=\"$acqlink\" rel=\"acquire\" type=\"text/html\" />\n";
+				}
+				if($catlink) {
+					print OUT "<link href=\"$catlink\" rel=\"acquire\" type=\"application/atom+xml;type=entry;profile=opds-catalog\" />\n";
+				}
 				print OUT $_;
 				$state = NONE;
 			}
@@ -283,7 +334,7 @@ sub WriteOPF {
 	}
 	close(OUT);
 	close(IN);
-	copy($tmpopf, $opf);
+#	copy($tmpopf, $opf);
 }
 
 # Delete unneeded id's from TOC file
