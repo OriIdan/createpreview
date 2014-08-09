@@ -24,9 +24,7 @@ Options:
 Written in perl, using the following non core CPAN modules:
 * XML::Parse
 * DateTime
-
-It currently uses system() call for unzip and zip so unzip and zip must be installed on system.
-This was written and tested on Linux system. It may not work on other OS.
+* Archive::Zip
 
 
 
