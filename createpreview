@@ -2,9 +2,9 @@
 # Create preview EPUB out of given EPUB
 # Written by: Ori Idan <ori@heliconbooks.com>
 # License: GPL v. 3 (http://www.gnu.org/copyleft/gpl.html)
-
-# This script takes an EPUB file, unpacks it, removes files (chapters) 
-# leaving a predefined number of chapters.
+$version = "2.0";
+# This script takes an EPUB file, unpacks it, removes spine items 
+# leaving a predefined number of spine items.
 # It will add metadata according to http://www.idpf.org/epub/previews/
 use Getopt::Long;
 use XML::Parser;
@@ -18,7 +18,7 @@ use Encode qw(decode);
 use Archive::Zip;
 binmode STDOUT, ":utf8";
 
-$tmpbase = "/tmp";
+$tmpbase = "staging";
 
 use constant {
 	NONE => 0,
@@ -36,14 +36,15 @@ use constant {
 $state = NONE;
 
 if(($#ARGV + 1) < 2) {
-	print "Create EPUB preview from given EPUB\n";
+	print "Create EPUB preview from given EPUB (version: $version)\n";
 	print "usage: createpreview [options] <epubfile> <num>\n";
 	print "options are:\n";
 	print "-o <outputfile> - Set output file name (default overwrite original)\n";
 	print "-a <acqlink> - Set acquisition link for original file\n";
 	print "--catalog <catalog> - Set link to OPDS catalog containing the original file\n";
 	print "-i <identifier> - Set new identifier for file\n";
-	print "--identifier <identifier> - Same as -s\n";
+	print "--identifier <identifier> - Same as -i\n";
+	print "-h <xhtml file> - XHTML file to add at end of new book\n";
 	exit;
 }
 
@@ -53,7 +54,7 @@ $codeset = langinfo(CODESET);
 # Get command line arguments
 $result = GetOptions("o=s" => \$newfile, "a=s" => \$acqlink, 
 	"catalog=s" => \$catlink,
-	"i=s" => \$identifier, "identifier=s" => \$identifier);
+	"i=s" => \$identifier, "identifier=s" => \$identifier, "h=s" => \$htmlfile);
 $epubname = $ARGV[0];
 $numchap = $ARGV[1];
 
@@ -80,12 +81,49 @@ $status = $zipfile->read($epubname);
 if($status != AZ_OK) {
 	die("Error extracting $epubname");
 }
-$zipfile->extractTree(undef, $tempdir);
+$zipfile->extractTree('', "$tempdir/");
 
 $container = "$tempdir/META-INF/container.xml";
 if(! -e $container) {
 	print "Error: $tempdir/META-INF/container.xml file does not exist\n";
 	exit;
+}
+
+if($htmlfile) {
+	# If we have HTML file to add, parse it for additional files such as images and CSS files
+	@additionalfiles = ($htmlfile);	# Initialize array of additional files
+	$hparse = new XML::Parser(Handlers => {Start => \&h_start });
+	$hparse->parsefile($htmlfile);
+}
+
+sub h_start {
+	my ($p, $elt, %atts) = @_;
+	if($elt eq 'link') {	# This might be a CSS file
+		$addedfile = $atts{'href'};
+		push @additionalfiles, $addedfile;
+	}
+	elsif($elt eq 'img') {	# This is an image file
+		$addedfile = $atts{'src'};
+		push @additionalfiles, $addedfile;
+	}
+}
+
+sub GetMediaType {
+	$ext = shift;
+	
+	if(($ext eq 'html') || ($ext eq 'xhtml')) {
+		return "application/xhtml+xml";
+	}
+	if($ext eq 'png') {
+		return "image/png";
+	}
+	if(($ext eq 'jpg') || ($ext eq 'jpeg')) {
+		return "image/jpeg";
+	}
+	if($ext eq 'ttf') {
+		return "application/x-font-ttf";
+	}
+	return '';
 }
 
 $cparse = new XML::Parser(Handlers => {Start => \&hdl_start });
@@ -129,16 +167,13 @@ sub AnalyzeOPF {
 		HandleNCX($ncxfile);
 	}
 	# We are done now with the 3 files we need to change, now pack the EPUB file
-	$cwd = getcwd;
-	print "CWD: $cwd\n";
-#	chdir($tempdir);
 	$outzip = Archive::Zip->new();
 	$outzip->addFile("$tempdir/mimetype", 'mimetype', 0);
 	$outzip->addTree("$tempdir/META-INF", 'META-INF');
 	print "Adding $tempdir/$rootfile\n";
 	$outzip->addFile("$tempdir/$rootfile", $rootfile);
 	$parseopf = new XML::Parser(Handlers => {'Start' => \&opf_packstart});
-	print "#Pack handleOPF $rootfile\n";
+	print "Pack handleOPF $rootfile\n";
 	($n, $oepbsdir, $ext) = fileparse($rootfile);
 	$parseopf->parsefile("$tempdir/$rootfile");
 	unless($outzip->writeToFileNamed($newfile) == AZ_OK) {
@@ -313,6 +348,17 @@ sub WriteOPF {
 				$state = SPINE;
 				$noprint = 1;
 			}
+			if(/\/manifest/) {	# closing tag of manifest section, write additonal files if any
+				foreach $addfile (@additionalfiles) {
+					print "Copy: $addfile to $base\n";
+					copy($addfile, $base);
+					$addfile =~ /(.*)\.(.*)/;
+					$b = $1;
+					$ext = $2;
+					$mediatype = GetMediaType($ext);
+					print OUT "<item id=\"$b\" href=\"$addfile\" media-type=\"$mediatype\" />\n";
+				}
+			}
 			$line = $_;
 			$line =~ /id="(.*?)"/;
 			$id = $1;
@@ -324,8 +370,7 @@ sub WriteOPF {
 			}
 			if($noprint && ($line =~ /\/>/)) {
 				$noprint = 0;
-			}
-			
+			}			
 		}
 		if($state == SPINE) {
 			$line = $_;
@@ -334,11 +379,17 @@ sub WriteOPF {
 			if(grep $_ eq $id, @remlist) {
 				$noprint = 1;
 			}
-			else {
+			elsif($line !~ /\/spine/) {
 				print OUT $line;
 				$noprint = 0;
 			}
 			if($line =~ /\/spine/) {
+				if($htmlfile) {	# add file to spine
+					$htmlfile =~ /(.*)\..*/;
+					$base = $1;
+					print OUT "<itemref idref=\"$base\" />\n";
+				}
+				print OUT $line;
 				$state = NONE;
 			}
 		}
